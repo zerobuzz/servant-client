@@ -1,7 +1,10 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 -- | This module provides 'client' which can automatically generate
@@ -15,7 +18,6 @@ module Servant.Client
 
 import Control.Monad
 import Control.Monad.Trans.Either
-import Data.Aeson
 import Data.ByteString.Lazy (ByteString)
 import Data.List
 import Data.Proxy
@@ -27,6 +29,13 @@ import Servant.API
 import Servant.Common.BaseUrl
 import Servant.Common.Req
 import Servant.Common.Text
+
+import Servant.Server.ContentTypes
+
+class TypeListElem x (xs :: k)
+instance TypeListElem x '[x]
+instance TypeListElem x xs => TypeListElem x (y ': xs)
+
 
 -- * Accessing APIs as a Client
 
@@ -41,15 +50,16 @@ import Servant.Common.Text
 -- > getAllBooks :: BaseUrl -> EitherT String IO [Book]
 -- > postNewBook :: Book -> BaseUrl -> EitherT String IO Book
 -- > (getAllBooks :<|> postNewBook) = client myApi
-client :: HasClient layout => Proxy layout -> Client layout
+client :: forall ctyp layout . HasClient ctyp layout
+      => Proxy (ctyp, layout) -> Client ctyp layout
 client p = clientWithRoute p defReq
 
 -- | This class lets us define how each API combinator
 -- influences the creation of an HTTP request. It's mostly
 -- an internal class, you can just use 'client'.
-class HasClient layout where
-  type Client layout :: *
-  clientWithRoute :: Proxy layout -> Req -> Client layout
+class HasClient ctyp layout where
+  type Client ctyp layout :: *
+  clientWithRoute :: Proxy (ctyp, layout) -> Req -> Client ctyp layout
 
 -- | A client querying function for @a ':<|>' b@ will actually hand you
 --   one function for querying @a@ and another one for querying @b@,
@@ -64,11 +74,11 @@ class HasClient layout where
 -- > getAllBooks :: BaseUrl -> EitherT String IO [Book]
 -- > postNewBook :: Book -> BaseUrl -> EitherT String IO Book
 -- > (getAllBooks :<|> postNewBook) = client myApi
-instance (HasClient a, HasClient b) => HasClient (a :<|> b) where
-  type Client (a :<|> b) = Client a :<|> Client b
+instance (HasClient ctyp a, HasClient ctyp b) => HasClient ctyp (a :<|> b) where
+  type Client ctyp (a :<|> b) = Client ctyp a :<|> Client ctyp b
   clientWithRoute Proxy req =
-    clientWithRoute (Proxy :: Proxy a) req :<|>
-    clientWithRoute (Proxy :: Proxy b) req
+    clientWithRoute (Proxy :: Proxy (ctyp, a)) req :<|>
+    clientWithRoute (Proxy :: Proxy (ctyp, b)) req
 
 -- | If you use a 'Capture' in one of your endpoints in your API,
 -- the corresponding querying function will automatically take
@@ -89,14 +99,14 @@ instance (HasClient a, HasClient b) => HasClient (a :<|> b) where
 -- > getBook :: Text -> BaseUrl -> EitherT String IO Book
 -- > getBook = client myApi
 -- > -- then you can just use "getBook" to query that endpoint
-instance (KnownSymbol capture, ToText a, HasClient sublayout)
-      => HasClient (Capture capture a :> sublayout) where
+instance (KnownSymbol capture, ToText a, HasClient ctyp sublayout)
+      => HasClient ctyp (Capture capture a :> sublayout) where
 
-  type Client (Capture capture a :> sublayout) =
-    a -> Client sublayout
+  type Client ctyp (Capture capture a :> sublayout) =
+    a -> Client ctyp sublayout
 
   clientWithRoute Proxy req val =
-    clientWithRoute (Proxy :: Proxy sublayout) $
+    clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
       appendToPath p req
 
     where p = unpack (toText val)
@@ -105,8 +115,8 @@ instance (KnownSymbol capture, ToText a, HasClient sublayout)
 -- side querying function that is created when calling 'client'
 -- will just require an argument that specifies the scheme, host
 -- and port to send the request to.
-instance HasClient Delete where
-  type Client Delete = BaseUrl -> EitherT String IO ()
+instance HasClient ctyp Delete where
+  type Client ctyp Delete = BaseUrl -> EitherT String IO ()
 
   clientWithRoute Proxy req host =
     void $ performRequest H.methodDelete req (== 204) host
@@ -115,10 +125,11 @@ instance HasClient Delete where
 -- side querying function that is created when calling 'client'
 -- will just require an argument that specifies the scheme, host
 -- and port to send the request to.
-instance FromJSON result => HasClient (Get result) where
-  type Client (Get result) = BaseUrl -> EitherT String IO result
+instance (MimeUnrender ctyp result, TypeListElem ctyp ctyps)
+      => HasClient ctyp (Get ctyps result) where
+  type Client ctyp (Get ctyps result) = BaseUrl -> EitherT String IO result
   clientWithRoute Proxy req host =
-    performRequestJSON H.methodGet req 200 host
+    performRequestCT (Proxy :: Proxy ctyp) H.methodGet req 200 host
 
 -- | If you use a 'Header' in one of your endpoints in your API,
 -- the corresponding querying function will automatically take
@@ -145,14 +156,14 @@ instance FromJSON result => HasClient (Get result) where
 -- > viewReferer = client myApi
 -- > -- then you can just use "viewRefer" to query that endpoint
 -- > -- specifying Nothing or Just "http://haskell.org/" as arguments
-instance (KnownSymbol sym, ToText a, HasClient sublayout)
-      => HasClient (Header sym a :> sublayout) where
+instance (KnownSymbol sym, ToText a, HasClient ctyp sublayout)
+      => HasClient ctyp (Header sym a :> sublayout) where
 
-  type Client (Header sym a :> sublayout) =
-    Maybe a -> Client sublayout
+  type Client ctyp (Header sym a :> sublayout) =
+    Maybe a -> Client ctyp sublayout
 
   clientWithRoute Proxy req mval =
-    clientWithRoute (Proxy :: Proxy sublayout) $
+    clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
       maybe req (\value -> addHeader hname value req) mval
 
     where hname = symbolVal (Proxy :: Proxy sym)
@@ -161,21 +172,23 @@ instance (KnownSymbol sym, ToText a, HasClient sublayout)
 -- side querying function that is created when calling 'client'
 -- will just require an argument that specifies the scheme, host
 -- and port to send the request to.
-instance FromJSON a => HasClient (Post a) where
-  type Client (Post a) = BaseUrl -> EitherT String IO a
+instance (MimeUnrender ctyp a, TypeListElem ctyp ctyps)
+      => HasClient ctyp (Post ctyps a) where
+  type Client ctyp (Post ctyps a) = BaseUrl -> EitherT String IO a
 
   clientWithRoute Proxy req uri =
-    performRequestJSON H.methodPost req 201 uri
+    performRequestCT (Proxy :: Proxy ctyp) H.methodPost req 201 uri
 
 -- | If you have a 'Put' endpoint in your API, the client
 -- side querying function that is created when calling 'client'
 -- will just require an argument that specifies the scheme, host
 -- and port to send the request to.
-instance FromJSON a => HasClient (Put a) where
-  type Client (Put a) = BaseUrl -> EitherT String IO a
+instance (MimeUnrender ctyp a, TypeListElem ctyp ctyps)
+      => HasClient ctyp (Put ctyps a) where
+  type Client ctyp (Put ctyps a) = BaseUrl -> EitherT String IO a
 
   clientWithRoute Proxy req host =
-    performRequestJSON H.methodPut req 200 host
+    performRequestCT (Proxy :: Proxy ctyp) H.methodPut req 200 host
 
 -- | If you use a 'QueryParam' in one of your endpoints in your API,
 -- the corresponding querying function will automatically take
@@ -202,15 +215,15 @@ instance FromJSON a => HasClient (Put a) where
 -- > -- then you can just use "getBooksBy" to query that endpoint.
 -- > -- 'getBooksBy Nothing' for all books
 -- > -- 'getBooksBy (Just "Isaac Asimov")' to get all books by Isaac Asimov
-instance (KnownSymbol sym, ToText a, HasClient sublayout)
-      => HasClient (QueryParam sym a :> sublayout) where
+instance (KnownSymbol sym, ToText a, HasClient ctyp sublayout)
+      => HasClient ctyp (QueryParam sym a :> sublayout) where
 
-  type Client (QueryParam sym a :> sublayout) =
-    Maybe a -> Client sublayout
+  type Client ctyp (QueryParam sym a :> sublayout) =
+    Maybe a -> Client ctyp sublayout
 
   -- if mparam = Nothing, we don't add it to the query string
   clientWithRoute Proxy req mparam =
-    clientWithRoute (Proxy :: Proxy sublayout) $
+    clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
       maybe req (flip (appendToQueryString pname) req . Just) mparamText
 
     where pname  = cs pname'
@@ -219,7 +232,7 @@ instance (KnownSymbol sym, ToText a, HasClient sublayout)
 
 -- | If you use a 'QueryParams' in one of your endpoints in your API,
 -- the corresponding querying function will automatically take
--- an additional argument, a list of values of the type specified 
+-- an additional argument, a list of values of the type specified
 -- by your 'QueryParams'.
 --
 -- If you give an empty list, nothing will be added to the query string.
@@ -244,14 +257,14 @@ instance (KnownSymbol sym, ToText a, HasClient sublayout)
 -- > -- 'getBooksBy []' for all books
 -- > -- 'getBooksBy ["Isaac Asimov", "Robert A. Heinlein"]'
 -- > --   to get all books by Asimov and Heinlein
-instance (KnownSymbol sym, ToText a, HasClient sublayout)
-      => HasClient (QueryParams sym a :> sublayout) where
+instance (KnownSymbol sym, ToText a, HasClient ctyp sublayout)
+      => HasClient ctyp (QueryParams sym a :> sublayout) where
 
-  type Client (QueryParams sym a :> sublayout) =
-    [a] -> Client sublayout
+  type Client ctyp (QueryParams sym a :> sublayout) =
+    [a] -> Client ctyp sublayout
 
   clientWithRoute Proxy req paramlist =
-    clientWithRoute (Proxy :: Proxy sublayout) $
+    clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
       foldl' (\ req' -> maybe req' (flip (appendToQueryString pname) req' . Just)) req paramlist'
 
     where pname  = cs pname'
@@ -279,14 +292,14 @@ instance (KnownSymbol sym, ToText a, HasClient sublayout)
 -- > -- then you can just use "getBooks" to query that endpoint.
 -- > -- 'getBooksBy False' for all books
 -- > -- 'getBooksBy True' to only get _already published_ books
-instance (KnownSymbol sym, HasClient sublayout)
-      => HasClient (QueryFlag sym :> sublayout) where
+instance (KnownSymbol sym, HasClient ctyp sublayout)
+      => HasClient ctyp (QueryFlag sym :> sublayout) where
 
-  type Client (QueryFlag sym :> sublayout) =
-    Bool -> Client sublayout
+  type Client ctyp (QueryFlag sym :> sublayout) =
+    Bool -> Client ctyp sublayout
 
   clientWithRoute Proxy req flag =
-    clientWithRoute (Proxy :: Proxy sublayout) $
+    clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
       if flag
         then appendToQueryString paramname Nothing req
         else req
@@ -318,15 +331,15 @@ instance (KnownSymbol sym, HasClient sublayout)
 -- > -- then you can just use "getBooksBy" to query that endpoint.
 -- > -- 'getBooksBy Nothing' for all books
 -- > -- 'getBooksBy (Just "Isaac Asimov")' to get all books by Isaac Asimov
-instance (KnownSymbol sym, ToText a, HasClient sublayout)
-      => HasClient (MatrixParam sym a :> sublayout) where
+instance (KnownSymbol sym, ToText a, HasClient ctyp sublayout)
+      => HasClient ctyp (MatrixParam sym a :> sublayout) where
 
-  type Client (MatrixParam sym a :> sublayout) =
-    Maybe a -> Client sublayout
+  type Client ctyp (MatrixParam sym a :> sublayout) =
+    Maybe a -> Client ctyp sublayout
 
   -- if mparam = Nothing, we don't add it to the query string
   clientWithRoute Proxy req mparam =
-    clientWithRoute (Proxy :: Proxy sublayout) $
+    clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
       maybe req (flip (appendToMatrixParams pname . Just) req) mparamText
 
     where pname = symbolVal (Proxy :: Proxy sym)
@@ -359,14 +372,14 @@ instance (KnownSymbol sym, ToText a, HasClient sublayout)
 -- > -- 'getBooksBy []' for all books
 -- > -- 'getBooksBy ["Isaac Asimov", "Robert A. Heinlein"]'
 -- > --   to get all books by Asimov and Heinlein
-instance (KnownSymbol sym, ToText a, HasClient sublayout)
-      => HasClient (MatrixParams sym a :> sublayout) where
+instance (KnownSymbol sym, ToText a, HasClient ctyp sublayout)
+      => HasClient ctyp (MatrixParams sym a :> sublayout) where
 
-  type Client (MatrixParams sym a :> sublayout) =
-    [a] -> Client sublayout
+  type Client ctyp (MatrixParams sym a :> sublayout) =
+    [a] -> Client ctyp sublayout
 
   clientWithRoute Proxy req paramlist =
-    clientWithRoute (Proxy :: Proxy sublayout) $
+    clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
       foldl' (\ req' value -> maybe req' (flip (appendToMatrixParams pname) req' . Just . cs) value) req paramlist'
 
     where pname  = cs pname'
@@ -394,14 +407,14 @@ instance (KnownSymbol sym, ToText a, HasClient sublayout)
 -- > -- then you can just use "getBooks" to query that endpoint.
 -- > -- 'getBooksBy False' for all books
 -- > -- 'getBooksBy True' to only get _already published_ books
-instance (KnownSymbol sym, HasClient sublayout)
-      => HasClient (MatrixFlag sym :> sublayout) where
+instance (KnownSymbol sym, HasClient ctyp sublayout)
+      => HasClient ctyp (MatrixFlag sym :> sublayout) where
 
-  type Client (MatrixFlag sym :> sublayout) =
-    Bool -> Client sublayout
+  type Client ctyp (MatrixFlag sym :> sublayout) =
+    Bool -> Client ctyp sublayout
 
   clientWithRoute Proxy req flag =
-    clientWithRoute (Proxy :: Proxy sublayout) $
+    clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
       if flag
         then appendToMatrixParams paramname Nothing req
         else req
@@ -410,10 +423,10 @@ instance (KnownSymbol sym, HasClient sublayout)
 
 -- | Pick a 'Method' and specify where the server you want to query is. You get
 -- back the status code and the response body as a 'ByteString'.
-instance HasClient Raw where
-  type Client Raw = H.Method -> BaseUrl -> EitherT String IO (Int, ByteString)
+instance HasClient ctyp Raw where
+  type Client ctyp Raw = H.Method -> BaseUrl -> EitherT String IO (Int, ByteString)
 
-  clientWithRoute :: Proxy Raw -> Req -> Client Raw
+  clientWithRoute :: Proxy (ctyp, Raw) -> Req -> Client ctyp Raw
   clientWithRoute Proxy req httpMethod host =
     performRequest httpMethod req (const True) host
 
@@ -435,23 +448,23 @@ instance HasClient Raw where
 -- > addBook :: Book -> BaseUrl -> EitherT String IO Book
 -- > addBook = client myApi
 -- > -- then you can just use "addBook" to query that endpoint
-instance (ToJSON a, HasClient sublayout)
-      => HasClient (ReqBody a :> sublayout) where
+instance (MimeRender ctyp a, TypeListElem ctyp ctyps, HasClient ctyp sublayout)
+      => HasClient ctyp (ReqBody ctyps a :> sublayout) where
 
-  type Client (ReqBody a :> sublayout) =
-    a -> Client sublayout
+  type Client ctyp (ReqBody ctyps a :> sublayout) =
+    a -> Client ctyp sublayout
 
   clientWithRoute Proxy req body =
-    clientWithRoute (Proxy :: Proxy sublayout) $
-      setRQBody (encode body) req
+    clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
+      setRQBody (toByteString (Proxy :: Proxy ctyp) body) req
 
 -- | Make the querying function append @path@ to the request path.
-instance (KnownSymbol path, HasClient sublayout) => HasClient (path :> sublayout) where
-  type Client (path :> sublayout) = Client sublayout
+instance (KnownSymbol path, HasClient ctyp sublayout)
+      => HasClient ctyp (path :> sublayout) where
+  type Client ctyp (path :> sublayout) = Client ctyp sublayout
 
   clientWithRoute Proxy req =
-     clientWithRoute (Proxy :: Proxy sublayout) $
+     clientWithRoute (Proxy :: Proxy (ctyp, sublayout)) $
        appendToPath p req
 
     where p = symbolVal (Proxy :: Proxy path)
-

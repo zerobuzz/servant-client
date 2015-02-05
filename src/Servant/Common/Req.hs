@@ -14,6 +14,7 @@ import Data.Aeson.Parser
 import Data.Aeson.Types
 import Data.Attoparsec.ByteString
 import Data.ByteString.Lazy hiding (pack)
+import Data.Proxy (Proxy(..))
 import Data.String
 import Data.String.Conversions
 import Data.Text
@@ -25,6 +26,8 @@ import Network.URI
 import Servant.Common.BaseUrl
 import Servant.Common.Text
 import System.IO.Unsafe
+
+import Servant.Server.ContentTypes
 
 import qualified Network.HTTP.Client as Client
 
@@ -137,6 +140,16 @@ performRequestJSON reqMethod req wantedStatus reqHost = do
     (\ message -> left (displayHttpRequest reqMethod ++ " returned invalid json: " ++ message))
     return
     (decodeLenient respBody)
+
+
+performRequestCT :: forall ctyp result . MimeUnrender ctyp result
+      => Data.Proxy.Proxy ctyp -> Method -> Req -> Int -> BaseUrl -> EitherT String IO result
+performRequestCT prx reqMethod req wantedStatus reqHost = do
+  (_status, respBody) <- performRequest reqMethod req (== wantedStatus) reqHost
+  maybe
+    (left $ displayHttpRequest reqMethod ++ " returned invalid content")
+    return
+    (fromByteString prx respBody)
 
 
 catchStatusCodeException :: IO a -> IO (Either Status a)

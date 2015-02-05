@@ -44,29 +44,27 @@ alice :: Person
 alice = Person "Alice" 42
 
 type Api =
-       "get" :> Get Person
+       "get" :> Get '[JSON] Person
   :<|> "delete" :> Delete
-  :<|> "capture" :> Capture "name" String :> Get Person
-  :<|> "body" :> ReqBody Person :> Post Person
-  :<|> "param" :> QueryParam "name" String :> Get Person
-  :<|> "params" :> QueryParams "names" String :> Get [Person]
-  :<|> "flag" :> QueryFlag "flag" :> Get Bool
-  :<|> "matrixparam" :> MatrixParam "name" String :> Get Person
-  :<|> "matrixparams" :> MatrixParams "name" String :> Get [Person]
-  :<|> "matrixflag" :> MatrixFlag "flag" :> Get Bool
+  :<|> "capture" :> Capture "name" String :> Get '[JSON] Person
+  :<|> "body" :> ReqBody '[JSON] Person :> Post '[JSON] Person
+  :<|> "param" :> QueryParam "name" String :> Get '[JSON] Person
+  :<|> "params" :> QueryParams "names" String :> Get '[JSON] [Person]
+  :<|> "flag" :> QueryFlag "flag" :> Get '[JSON] Bool
+  :<|> "matrixparam" :> MatrixParam "name" String :> Get '[JSON] Person
+  :<|> "matrixparams" :> MatrixParams "name" String :> Get '[JSON] [Person]
+  :<|> "matrixflag" :> MatrixFlag "flag" :> Get '[JSON] Bool
   :<|> "rawSuccess" :> Raw
   :<|> "rawFailure" :> Raw
   :<|> "multiple" :>
             Capture "first" String :>
             QueryParam "second" Int :>
             QueryFlag "third" :>
-            ReqBody [(String, [Rational])] :>
-            Get (String, Maybe Int, Bool, [(String, [Rational])])
-api :: Proxy Api
-api = Proxy
+            ReqBody '[JSON] [(String, [Rational])] :>
+            Get '[JSON] (String, Maybe Int, Bool, [(String, [Rational])])
 
 server :: Application
-server = serve api (
+server = serve (Proxy :: Proxy Api) (
        return alice
   :<|> return ()
   :<|> (\ name -> return $ Person name 0)
@@ -119,7 +117,7 @@ getMultiple :: String -> Maybe Int -> Bool -> [(String, [Rational])]
  :<|> getRawSuccess
  :<|> getRawFailure
  :<|> getMultiple)
-    = client api
+    = client (Proxy :: Proxy (JSON, Api))
 
 spec :: Spec
 spec = do
@@ -189,21 +187,21 @@ spec = do
           withWaiDaemon (return (serve api (left (500, "error message")))) $
           \ host -> do
             let getResponse :: BaseUrl -> EitherT String IO ()
-                getResponse = client api
+                getResponse = client (Proxy :: Proxy (JSON, Api))
             Left result <- runEitherT (getResponse host)
             result `shouldContain` "error message"
     mapM_ test $
-      (WrappedApi (Proxy :: Proxy Delete)) :
-      (WrappedApi (Proxy :: Proxy (Get ()))) :
-      (WrappedApi (Proxy :: Proxy (Post ()))) :
-      (WrappedApi (Proxy :: Proxy (Put ()))) :
+      (WrappedApi (Proxy :: Proxy (JSON, Delete))) :
+      (WrappedApi (Proxy :: Proxy (JSON, Get '[JSON] ()))) :
+      (WrappedApi (Proxy :: Proxy (JSON, Post '[JSON] ()))) :
+      (WrappedApi (Proxy :: Proxy (JSON, Put '[JSON] ()))) :
       []
 
 data WrappedApi where
   WrappedApi :: (HasServer api, Server api ~ EitherT (Int, String) IO a,
-                 HasClient api, Client api ~ (BaseUrl -> EitherT String IO ()),
+                 HasClient ctyp api, Client ctyp api ~ (BaseUrl -> EitherT String IO ()),
                  Typeable api) =>
-    Proxy api -> WrappedApi
+    Proxy (ctyp, api) -> WrappedApi
 
 
 -- * utils
