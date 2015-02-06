@@ -1,5 +1,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeOperators #-}
@@ -44,26 +46,39 @@ alice :: Person
 alice = Person "Alice" 42
 
 type Api =
-       "get" :> Get Person
+       "get" :> Get '[JSON] Person
   :<|> "delete" :> Delete
-  :<|> "capture" :> Capture "name" String :> Get Person
-  :<|> "body" :> ReqBody Person :> Post Person
-  :<|> "param" :> QueryParam "name" String :> Get Person
-  :<|> "params" :> QueryParams "names" String :> Get [Person]
-  :<|> "flag" :> QueryFlag "flag" :> Get Bool
-  :<|> "matrixparam" :> MatrixParam "name" String :> Get Person
-  :<|> "matrixparams" :> MatrixParams "name" String :> Get [Person]
-  :<|> "matrixflag" :> MatrixFlag "flag" :> Get Bool
+  :<|> "capture" :> Capture "name" String :> Get '[JSON] Person
+  :<|> "body" :> ReqBody '[JSON] Person :> Post '[JSON] Person
+  :<|> "param" :> QueryParam "name" String :> Get '[JSON] Person
+  :<|> "params" :> QueryParams "names" String :> Get '[JSON] [Person]
+  :<|> "flag" :> QueryFlag "flag" :> Get '[JSON] Bool
+  :<|> "matrixparam" :> MatrixParam "name" String :> Get '[JSON] Person
+  :<|> "matrixparams" :> MatrixParams "name" String :> Get '[JSON] [Person]
+  :<|> "matrixflag" :> MatrixFlag "flag" :> Get '[JSON] Bool
   :<|> "rawSuccess" :> Raw
   :<|> "rawFailure" :> Raw
   :<|> "multiple" :>
             Capture "first" String :>
             QueryParam "second" Int :>
             QueryFlag "third" :>
-            ReqBody [(String, [Rational])] :>
-            Get (String, Maybe Int, Bool, [(String, [Rational])])
+            ReqBody '[JSON] [(String, [Rational])] :>
+            Get '[JSON] (String, Maybe Int, Bool, [(String, [Rational])])
 api :: Proxy Api
 api = Proxy
+
+instance ReqCT (ReqBody '[JSON] a) where
+  type ReqCTChoice (ReqBody '[JSON] a) = JSON
+
+instance RespCT (Get '[JSON] a) where
+  type RespCTChoice (Get '[JSON] a) = JSON
+
+instance RespCT (Post '[JSON] a) where
+  type RespCTChoice (Post '[JSON] a) = JSON
+
+instance RespCT (Put '[JSON] a) where
+  type RespCTChoice (Put '[JSON] a) = JSON
+
 
 server :: Application
 server = serve api (
@@ -194,9 +209,9 @@ spec = do
             result `shouldContain` "error message"
     mapM_ test $
       (WrappedApi (Proxy :: Proxy Delete)) :
-      (WrappedApi (Proxy :: Proxy (Get ()))) :
-      (WrappedApi (Proxy :: Proxy (Post ()))) :
-      (WrappedApi (Proxy :: Proxy (Put ()))) :
+      (WrappedApi (Proxy :: Proxy (Get '[JSON] ()))) :
+      (WrappedApi (Proxy :: Proxy (Post '[JSON] ()))) :
+      (WrappedApi (Proxy :: Proxy (Put '[JSON] ()))) :
       []
 
 data WrappedApi where

@@ -2,6 +2,9 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 -- | This module provides 'client' which can automatically generate
@@ -9,7 +12,7 @@
 -- API.
 module Servant.Client
   ( client
-  , HasClient(..)
+  , HasClient(..), ReqCT(..), RespCT(..)
   , module Servant.Common.BaseUrl
   ) where
 
@@ -27,6 +30,8 @@ import Servant.API
 import Servant.Common.BaseUrl
 import Servant.Common.Req
 import Servant.Common.Text
+
+import Servant.Server.ContentTypes
 
 -- * Accessing APIs as a Client
 
@@ -50,6 +55,13 @@ client p = clientWithRoute p defReq
 class HasClient layout where
   type Client layout :: *
   clientWithRoute :: Proxy layout -> Req -> Client layout
+
+-- FIXME: i think we can use stand-alone type families for this?
+class ReqCT layout where
+  type ReqCTChoice layout
+
+class RespCT layout where
+  type RespCTChoice layout
 
 -- | A client querying function for @a ':<|>' b@ will actually hand you
 --   one function for querying @a@ and another one for querying @b@,
@@ -115,10 +127,12 @@ instance HasClient Delete where
 -- side querying function that is created when calling 'client'
 -- will just require an argument that specifies the scheme, host
 -- and port to send the request to.
-instance FromJSON result => HasClient (Get result) where
-  type Client (Get result) = BaseUrl -> EitherT String IO result
+instance forall ctyps ctyp result .
+         (ctyp ~ RespCTChoice (Get ctyps result), MimeUnrender ctyp result)
+      => HasClient (Get ctyps result) where
+  type Client (Get ctyps result) = BaseUrl -> EitherT String IO result
   clientWithRoute Proxy req host =
-    performRequestJSON H.methodGet req 200 host
+    performRequestCT (Proxy :: Proxy ctyp) H.methodGet req 200 host
 
 -- | If you use a 'Header' in one of your endpoints in your API,
 -- the corresponding querying function will automatically take
@@ -161,21 +175,25 @@ instance (KnownSymbol sym, ToText a, HasClient sublayout)
 -- side querying function that is created when calling 'client'
 -- will just require an argument that specifies the scheme, host
 -- and port to send the request to.
-instance FromJSON a => HasClient (Post a) where
-  type Client (Post a) = BaseUrl -> EitherT String IO a
+instance forall ctyps ctyp result .
+         (ctyp ~ RespCTChoice (Post ctyps result), MimeUnrender ctyp result)
+      => HasClient (Post ctyps result) where
+  type Client (Post ctyps result) = BaseUrl -> EitherT String IO result
 
   clientWithRoute Proxy req uri =
-    performRequestJSON H.methodPost req 201 uri
+    performRequestCT (Proxy :: Proxy ctyp) H.methodPost req 201 uri
 
 -- | If you have a 'Put' endpoint in your API, the client
 -- side querying function that is created when calling 'client'
 -- will just require an argument that specifies the scheme, host
 -- and port to send the request to.
-instance FromJSON a => HasClient (Put a) where
-  type Client (Put a) = BaseUrl -> EitherT String IO a
+instance forall ctyps ctyp result .
+         (ctyp ~ RespCTChoice (Put ctyps result), MimeUnrender ctyp result)
+      => HasClient (Put ctyps result) where
+  type Client (Put ctyps result) = BaseUrl -> EitherT String IO result
 
   clientWithRoute Proxy req host =
-    performRequestJSON H.methodPut req 200 host
+    performRequestCT (Proxy :: Proxy ctyp) H.methodPut req 200 host
 
 -- | If you use a 'QueryParam' in one of your endpoints in your API,
 -- the corresponding querying function will automatically take
@@ -435,15 +453,15 @@ instance HasClient Raw where
 -- > addBook :: Book -> BaseUrl -> EitherT String IO Book
 -- > addBook = client myApi
 -- > -- then you can just use "addBook" to query that endpoint
-instance (ToJSON a, HasClient sublayout)
-      => HasClient (ReqBody a :> sublayout) where
-
-  type Client (ReqBody a :> sublayout) =
+instance forall ctyps ctyp a sublayout .
+         (ctyp ~ ReqCTChoice (ReqBody ctyps a), MimeRender ctyp a, HasClient sublayout)
+      => HasClient (ReqBody ctyps a :> sublayout) where
+  type Client (ReqBody ctyps a :> sublayout) =
     a -> Client sublayout
 
   clientWithRoute Proxy req body =
     clientWithRoute (Proxy :: Proxy sublayout) $
-      setRQBody (encode body) req
+      setRQBody (toByteString (Proxy :: Proxy ctyp) body) req
 
 -- | Make the querying function append @path@ to the request path.
 instance (KnownSymbol path, HasClient sublayout) => HasClient (path :> sublayout) where

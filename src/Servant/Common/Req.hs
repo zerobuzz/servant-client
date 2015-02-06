@@ -26,6 +26,9 @@ import Servant.Common.BaseUrl
 import Servant.Common.Text
 import System.IO.Unsafe
 
+import Servant.Server.ContentTypes
+import qualified Data.Proxy as Proxy
+
 import qualified Network.HTTP.Client as Client
 
 data Req = Req
@@ -137,6 +140,16 @@ performRequestJSON reqMethod req wantedStatus reqHost = do
     (\ message -> left (displayHttpRequest reqMethod ++ " returned invalid json: " ++ message))
     return
     (decodeLenient respBody)
+
+
+performRequestCT :: forall ctyp result . MimeUnrender ctyp result
+      => Proxy.Proxy ctyp -> Method -> Req -> Int -> BaseUrl -> EitherT String IO result
+performRequestCT prx reqMethod req wantedStatus reqHost = do
+  (_status, respBody) <- performRequest reqMethod req (== wantedStatus) reqHost
+  maybe
+    (left $ displayHttpRequest reqMethod ++ " returned invalid content")
+    return
+    (fromByteString prx respBody)
 
 
 catchStatusCodeException :: IO a -> IO (Either Status a)
